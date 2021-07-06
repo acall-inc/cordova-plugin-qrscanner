@@ -240,10 +240,73 @@ class QRScanner : CDVPlugin, AVCaptureMetadataOutputObjectsDelegate {
         let found = metadataObjects[0] as! AVMetadataMachineReadableCodeObject
         if found.type == AVMetadataObject.ObjectType.qr && found.stringValue != nil {
             scanning = false
-            let pluginResult = CDVPluginResult(status: CDVCommandStatus_OK, messageAs: found.stringValue)
+            let pluginResult = CDVPluginResult(status: CDVCommandStatus_OK, messageAs: ["text": found.stringValue!, "base64Encode": false])
             commandDelegate!.send(pluginResult, callbackId: nextScanningCommand?.callbackId!)
             nextScanningCommand = nil
+        } else if found.type == AVMetadataObject.ObjectType.qr {
+            let pluginResult:CDVPluginResult
+            if let result = byteDataToBase64EncodedString(found) {
+                scanning = false
+                pluginResult = CDVPluginResult(status: CDVCommandStatus_OK, messageAs: ["text": result, "base64Encode": true])
+                commandDelegate!.send(pluginResult, callbackId: nextScanningCommand?.callbackId!)
+                nextScanningCommand = nil
+            }
         }
+    }
+
+    // Return base64 encoded string
+    // NOTE: ビットシフトでDataから値を取れないようなので、hex文字列にすることで、4bit単位で処理できるようにしています。
+    func byteDataToBase64EncodedString(_ foundData: AVMetadataMachineReadableCodeObject) -> String? {
+        let desc = foundData.descriptor as! CIQRCodeDescriptor
+        let rawBytes = desc.errorCorrectedPayload
+        let hexString = rawBytes.map { String(format: "%02hhx", $0) }.joined()
+
+        // はじめの4bitがmode、その後8bitがデータのビット数
+        // バイナリデータの場合は、modeが4となる
+        // QRコード仕様書: https://kikakurui.com/x0/X0510-2004-01.html
+        guard var mode = (rawBytes.first) else {
+            return nil
+        }
+        mode = mode >> 4
+        if mode != 0x04 {
+            return nil
+        }
+        
+        guard let numOfBytesData = hexStringToData(subscriptString(hexString, start: 1, offset: 2)) else {
+            return nil
+        }
+        let numOfBytes = numOfBytesData.withUnsafeBytes { $0.load(as: Int8.self) }
+        let numOfHex = Int(numOfBytes * 2)
+        
+        guard let data = hexStringToData(subscriptString(hexString, start: 3, offset: numOfHex)) else {
+            return nil
+        }
+        let dataString = data.base64EncodedString()
+        return dataString
+    }
+
+    // Return substring start..<(start + offset)
+    func subscriptString(_ str: String, start: Int, offset: Int) -> String {
+        let startIndex = str.index(str.startIndex, offsetBy: start)
+        let endIndex = str.index(startIndex, offsetBy: offset)
+        return String(str[startIndex..<endIndex])
+    }
+
+    // Return binary data from hex string
+    func hexStringToData(_ hexString: String) -> Data? {
+        let length = hexString.count / 2
+        var data = Data(capacity: length)
+        for i in 0 ..< length {
+            let j = hexString.index(hexString.startIndex, offsetBy: i * 2)
+            let k = hexString.index(j, offsetBy: 2)
+            let bytes = hexString[j..<k]
+            if var byte = UInt8(bytes, radix: 16) {
+                data.append(&byte, count: 1)
+            } else {
+                return nil
+            }
+        }
+        return data
     }
 
     @objc func pageDidLoad() {
